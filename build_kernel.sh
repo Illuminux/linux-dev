@@ -1,6 +1,6 @@
 #!/bin/sh -e
 #
-# Copyright (c) 2009-2013 Robert Nelson <robertcnelson@gmail.com>
+# Copyright (c) 2009-2014 Robert Nelson <robertcnelson@gmail.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -27,28 +27,63 @@ mkdir -p ${DIR}/deploy/
 patch_kernel () {
 	cd ${DIR}/KERNEL
 
-	export DIR GIT_OPTS
+	export DIR
 	/bin/sh -e ${DIR}/patch.sh || { git add . ; exit 1 ; }
 
 	if [ ! "${RUN_BISECT}" ] ; then
-		git add .
+		git add --all
 		git commit --allow-empty -a -m "${KERNEL_TAG}-${BUILD} patchset"
 	fi
 
 	cd ${DIR}/
 }
 
+config_reference () {
+	echo "Updating reference config: ${ref_config}"
+	make ARCH=arm CROSS_COMPILE="${CCACHE} ${CC}" ${ref_config}
+	cp -v .config ${DIR}/patches/example_${ref_config}
+}
+
 copy_defconfig () {
 	cd ${DIR}/KERNEL/
-	make ARCH=arm CROSS_COMPILE=${CC} distclean
-	make ARCH=arm CROSS_COMPILE=${CC} ${config}
+	make ARCH=arm CROSS_COMPILE="${CC}" distclean
+	make ARCH=arm CROSS_COMPILE="${CC}" ${config}
 	cp -v .config ${DIR}/patches/ref_${config}
 
-	make ARCH=arm CROSS_COMPILE=${CC} imx_v6_v7_defconfig
-	cp -v .config ${DIR}/patches/example_imx_v6_v7_defconfig
+	ref_config="imx_v6_v7_defconfig"
+	config_reference
 
-	make ARCH=arm CROSS_COMPILE=${CC} omap2plus_defconfig
-	cp -v .config ${DIR}/patches/example_omap2plus_defconfig
+	ref_config="omap2plus_defconfig"
+	config_reference
+
+	ref_config="sunxi_defconfig"
+	config_reference
+
+	ref_config="tegra_defconfig"
+	config_reference
+
+	echo "-----------------------------"
+	echo "Updating: defconfig-lpae"
+	echo "-----------------------------"
+	cp -v ${DIR}/patches/defconfig-lpae .config
+	make ARCH=arm CROSS_COMPILE="${CCACHE} ${CC}" oldconfig
+	cp -v .config ${DIR}/patches/defconfig-lpae
+	echo "-----------------------------"
+
+	echo "-----------------------------"
+	echo "Updating: defconfig-bone"
+	echo "-----------------------------"
+	cp -v ${DIR}/patches/defconfig-bone .config
+	make ARCH=arm CROSS_COMPILE="${CCACHE} ${CC}" oldconfig
+	cp -v .config ${DIR}/patches/defconfig-bone
+	echo "-----------------------------"
+
+	echo "-----------------------------"
+	echo "Updating: defconfig"
+	echo "-----------------------------"
+	cp -v ${DIR}/patches/defconfig .config
+	make ARCH=arm CROSS_COMPILE="${CCACHE} ${CC}" oldconfig
+	cp -v .config ${DIR}/patches/defconfig
 
 	cp -v ${DIR}/patches/defconfig .config
 	cd ${DIR}/
@@ -56,23 +91,40 @@ copy_defconfig () {
 
 make_menuconfig () {
 	cd ${DIR}/KERNEL/
-	make ARCH=arm CROSS_COMPILE=${CC} menuconfig
+	make ARCH=arm CROSS_COMPILE="${CC}" menuconfig
 	cp -v .config ${DIR}/patches/defconfig
 	cd ${DIR}/
 }
 
 make_kernel () {
+	image="zImage"
+	unset address
+
+	#uImage, if you really really want a uImage, zreladdr needs to be defined on the build line going forward...
+	#image="uImage"
+	#address="LOADADDR=${ZRELADDR}"
+
 	cd ${DIR}/KERNEL/
 	echo "-----------------------------"
-	echo "make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE=\"${CC}\" zImage modules"
+	echo "make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" ${address} ${image} modules"
 	echo "-----------------------------"
-	make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" zImage modules
+	make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" ${address} ${image} modules
 
 	unset DTBS
-	cat ${DIR}/KERNEL/arch/arm/Makefile | grep "dtbs:" >/dev/null 2>&1 && DTBS=1
-	if [ "x${DTBS}" != "x" ] ; then
+	cat ${DIR}/KERNEL/arch/arm/Makefile | grep "dtbs:" >/dev/null 2>&1 && DTBS=enable
+
+	#FIXME: Starting with v3.15-rc0
+	unset has_dtbs_install
+	if [ "x${DTBS}" = "x" ] ; then
+		cat ${DIR}/KERNEL/arch/arm/Makefile | grep "dtbs dtbs_install:" >/dev/null 2>&1 && DTBS=enable
+		if [ "x${DTBS}" = "xenable" ] ; then
+			has_dtbs_install=enable
+		fi
+	fi
+
+	if [ "x${DTBS}" = "xenable" ] ; then
 		echo "-----------------------------"
-		echo "make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE=\"${CC}\" dtbs"
+		echo "make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" dtbs"
 		echo "-----------------------------"
 		make -j${CORES} ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" dtbs
 		ls arch/arm/boot/* | grep dtb >/dev/null 2>&1 || unset DTBS
@@ -80,24 +132,31 @@ make_kernel () {
 
 	KERNEL_UTS=$(cat ${DIR}/KERNEL/include/generated/utsrelease.h | awk '{print $3}' | sed 's/\"//g' )
 
-	deployfile=".zImage"
-	if [ -f "${DIR}/deploy/${KERNEL_UTS}${deployfile}" ] ; then
-		rm -rf "${DIR}/deploy/${KERNEL_UTS}${deployfile}" || true
-		rm -rf "${DIR}/deploy/${KERNEL_UTS}.config" || true
+	if [ -f "${DIR}/deploy/${KERNEL_UTS}.${image}" ] ; then
+		rm -rf "${DIR}/deploy/${KERNEL_UTS}.${image}" || true
+		rm -rf "${DIR}/deploy/config-${KERNEL_UTS}" || true
 	fi
 
-	if [ -f ./arch/arm/boot/zImage ] ; then
-		cp -v arch/arm/boot/zImage "${DIR}/deploy/${KERNEL_UTS}.zImage"
-		cp -v .config "${DIR}/deploy/${KERNEL_UTS}.config"
+	if [ -f ./arch/arm/boot/${image} ] ; then
+		if [ ${AUTO_TESTER} ] ; then
+			mkdir -p "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/" || true
+			cp -uv arch/arm/boot/${image} "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/${KERNEL_UTS}.${image}"
+			xz -z "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/${KERNEL_UTS}.${image}"
+			mkimage -A arm -O linux -T kernel -C none -a 0x80008000 -e 0x80008000 -n ${KERNEL_UTS} -d arch/arm/boot/zImage "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/${KERNEL_UTS}.uImage"
+			xz -z "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/${KERNEL_UTS}.uImage"
+			cp -uv .config "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/config-${KERNEL_UTS}"
+		fi
+		cp -v arch/arm/boot/${image} "${DIR}/deploy/${KERNEL_UTS}.${image}"
+		cp -v .config "${DIR}/deploy/config-${KERNEL_UTS}"
 	fi
 
 	cd ${DIR}/
 
-	if [ ! -f "${DIR}/deploy/${KERNEL_UTS}${deployfile}" ] ; then
-		export ERROR_MSG="File Generation Failure: [${KERNEL_UTS}${deployfile}]"
+	if [ ! -f "${DIR}/deploy/${KERNEL_UTS}.${image}" ] ; then
+		export ERROR_MSG="File Generation Failure: [${KERNEL_UTS}.${image}]"
 		/bin/sh -e "${DIR}/scripts/error.sh" && { exit 1 ; }
 	else
-		ls -lh "${DIR}/deploy/${KERNEL_UTS}${deployfile}"
+		ls -lh "${DIR}/deploy/${KERNEL_UTS}.${image}"
 	fi
 }
 
@@ -105,6 +164,15 @@ make_pkg () {
 	cd ${DIR}/KERNEL/
 
 	deployfile="-${pkg}.tar.gz"
+	tar_options="--create --gzip --file"
+
+	if [ "${AUTO_TESTER}" ] ; then
+		#FIXME: xz might not be available everywhere...
+		#FIXME: ./tools/install_kernel.sh needs update...
+		deployfile="-${pkg}.tar.xz"
+		tar_options="--create --xz --file"
+	fi
+
 	if [ -f "${DIR}/deploy/${KERNEL_UTS}${deployfile}" ] ; then
 		rm -rf "${DIR}/deploy/${KERNEL_UTS}${deployfile}" || true
 	fi
@@ -119,19 +187,27 @@ make_pkg () {
 
 	case "${pkg}" in
 	modules)
-		make -s ARCH=arm CROSS_COMPILE=${CC} modules_install INSTALL_MOD_PATH=${DIR}/deploy/tmp
+		make -s ARCH=arm CROSS_COMPILE="${CC}" modules_install INSTALL_MOD_PATH=${DIR}/deploy/tmp
 		;;
 	firmware)
-		make -s ARCH=arm CROSS_COMPILE=${CC} firmware_install INSTALL_FW_PATH=${DIR}/deploy/tmp
+		make -s ARCH=arm CROSS_COMPILE="${CC}" firmware_install INSTALL_FW_PATH=${DIR}/deploy/tmp
 		;;
 	dtbs)
-		find ./arch/arm/boot/ -iname "*.dtb" -exec cp -v '{}' ${DIR}/deploy/tmp/ \;
+		if [ "x${has_dtbs_install}" = "xenable" ] ; then
+			make -s ARCH=arm LOCALVERSION=-${BUILD} CROSS_COMPILE="${CC}" dtbs_install INSTALL_DTBS_PATH=${DIR}/deploy/tmp
+		else
+			find ./arch/arm/boot/ -iname "*.dtb" -exec cp -v '{}' ${DIR}/deploy/tmp/ \;
+		fi
 		;;
 	esac
 
 	echo "Compressing ${KERNEL_UTS}${deployfile}..."
 	cd ${DIR}/deploy/tmp
-	tar czf ../${KERNEL_UTS}${deployfile} *
+	tar ${tar_options} ../${KERNEL_UTS}${deployfile} *
+
+	if [ ${AUTO_TESTER} ] ; then
+		cp -uv ../${KERNEL_UTS}${deployfile} "${DIR}/deploy/beagleboard.org/${KERNEL_UTS}/"
+	fi
 
 	cd ${DIR}/
 	rm -rf ${DIR}/deploy/tmp || true
@@ -159,14 +235,17 @@ make_dtbs_pkg () {
 	make_pkg
 }
 
+update_latest () {
+	echo "#!/bin/sh -e" > "${DIR}/deploy/beagleboard.org/latest"
+	echo "abi=aac" >> "${DIR}/deploy/beagleboard.org/latest"
+	echo "kernel=${KERNEL_UTS}" >> "${DIR}/deploy/beagleboard.org/latest"
+	cp -uv ./tools/test-me.sh "${DIR}/deploy/beagleboard.org/"
+}
+
 /bin/sh -e ${DIR}/tools/host_det.sh || { exit 1 ; }
 
 if [ ! -f ${DIR}/system.sh ] ; then
-	cp ${DIR}/system.sh.sample ${DIR}/system.sh
-else
-	#fixes for bash -> sh conversion...
-	sed -i 's/bash/sh/g' ${DIR}/system.sh
-	sed -i 's/==/=/g' ${DIR}/system.sh
+	cp -v ${DIR}/system.sh.sample ${DIR}/system.sh
 fi
 
 if [ -f "${DIR}/branches.list" ] ; then
@@ -195,7 +274,12 @@ unset LINUX_GIT
 . ${DIR}/system.sh
 /bin/sh -e "${DIR}/scripts/gcc.sh" || { exit 1 ; }
 . ${DIR}/.CC
-echo "debug: CC=${CC}"
+if [ ${AUTO_BUILD} ] ; then
+	if [ -f /usr/bin/ccache ] ; then
+		CC="ccache ${CC}"
+	fi
+fi
+echo "CROSS_COMPILE=${CC}"
 
 . ${DIR}/version.sh
 export LINUX_GIT
@@ -204,6 +288,7 @@ export LINUX_GIT
 FULL_REBUILD=1
 if [ "${FULL_REBUILD}" ] ; then
 	/bin/sh -e "${DIR}/scripts/git.sh" || { exit 1 ; }
+	cp "${DIR}/KERNEL/scripts/package/builddeb" "${DIR}/3rdparty/packaging/"
 
 	if [ "${RUN_BISECT}" ] ; then
 		/bin/sh -e "${DIR}/scripts/bisect.sh" || { exit 1 ; }
@@ -218,8 +303,11 @@ fi
 make_kernel
 make_modules_pkg
 make_firmware_pkg
-if [ "x${DTBS}" != "x" ] ; then
+if [ "x${DTBS}" = "xenable" ] ; then
 	make_dtbs_pkg
+fi
+if [ "${AUTO_TESTER}" ] ; then
+	update_latest
 fi
 echo "-----------------------------"
 echo "Script Complete"

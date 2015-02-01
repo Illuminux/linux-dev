@@ -1,0 +1,29 @@
+From 6bf783a29d72d58cf8bf38c9b28d91aaa3aa8e69 Mon Sep 17 00:00:00 2001
+From: Robert Nelson <robertcnelson@gmail.com>
+Date: Tue, 5 Aug 2014 11:52:45 -0500
+Subject: [PATCH 7/8] omap3-beagle-xm: ehci works again
+
+Signed-off-by: Robert Nelson <robertcnelson@gmail.com>
+---
+ arch/arm/boot/dts/omap3-beagle-xm.dts | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/arch/arm/boot/dts/omap3-beagle-xm.dts b/arch/arm/boot/dts/omap3-beagle-xm.dts
+index 503bdc4..a8e6bd3 100644
+--- a/arch/arm/boot/dts/omap3-beagle-xm.dts
++++ b/arch/arm/boot/dts/omap3-beagle-xm.dts
+@@ -298,11 +298,6 @@
+ 			codec {
+ 			};
+ 		};
+-
+-		twl_power: power {
+-			compatible = "ti,twl4030-power-beagleboard-xm", "ti,twl4030-power-idle-osc-off";
+-			ti,use_poweroff;
+-		};
+ 	};
+ };
+ 
+-- 
+2.1.3
+

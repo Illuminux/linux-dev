@@ -1,6 +1,6 @@
 #!/bin/sh -e
 #
-# Copyright (c) 2009-2013 Robert Nelson <robertcnelson@gmail.com>
+# Copyright (c) 2009-2015 Robert Nelson <robertcnelson@gmail.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,9 +22,6 @@
 
 unset KERNEL_UTS
 unset MMC
-unset ZRELADDR
-
-BOOT_PARITION="1"
 
 DIR=$PWD
 
@@ -37,58 +34,69 @@ mmc_write_rootfs () {
 		sudo rm -rf "${location}/lib/modules/${KERNEL_UTS}" || true
 	fi
 
-	sudo tar ${UNTAR} "${DIR}/deploy/${KERNEL_UTS}-modules.tar.gz" -C "${location}"
+	sudo tar ${UNTAR} "${DIR}/deploy/${KERNEL_UTS}-modules.tar.gz" -C "${location}/"
 	sync
 
-	echo "Installing ${KERNEL_UTS}-firmware.tar.gz to ${partition}"
-
-	if [ -d "${DIR}/deploy/tmp" ] ; then
-		rm -rf "${DIR}/deploy/tmp" || true
-	fi
-	mkdir -p "${DIR}/deploy/tmp/"
-
-	tar -xf "${DIR}/deploy/${KERNEL_UTS}-firmware.tar.gz" -C "${DIR}/deploy/tmp/"
-	sync
-
-	sudo cp -v "${DIR}/deploy/tmp"/*.dtbo "${location}/lib/firmware/" 2>/dev/null || true
-	sync
-
-	rm -rf "${DIR}/deploy/tmp/" || true
-
-	if [ "${ZRELADDR}" ] ; then
-		if [ ! -f "${location}/boot/SOC.sh" ] ; then
-			if [ -f "${location}/boot/uImage" ] ; then
-			#Possibly Angstrom: dump a newer uImage if one exists..
-				if [ -f "${location}/boot/uImage_bak" ] ; then
-					sudo rm -f "${location}/boot/uImage_bak" || true
-				fi
-
-				sudo mv "${location}/boot/uImage" "${location}/boot/uImage_bak"
-				sudo mkimage -A arm -O linux -T kernel -C none -a ${ZRELADDR} -e ${ZRELADDR} -n ${KERNEL_UTS} -d "${DIR}/deploy/${KERNEL_UTS}.zImage" "${location}/boot/uImage"
-			fi
+	if [ -f "${DIR}/deploy/config-${KERNEL_UTS}" ] ; then
+		if [ -f "${location}/boot/config-${KERNEL_UTS}" ] ; then
+			sudo rm -f "${location}/boot/config-${KERNEL_UTS}" || true
 		fi
+		sudo cp -v "${DIR}/deploy/config-${KERNEL_UTS}" "${location}/boot/config-${KERNEL_UTS}"
+		sync
+	fi
+	echo "info: [${KERNEL_UTS}] now installed..."
+}
+
+mmc_write_boot_uname () {
+	echo "Installing ${KERNEL_UTS} to ${partition}"
+
+	if [ -f "${location}/vmlinuz-${KERNEL_UTS}_bak" ] ; then
+		sudo rm -f "${location}/vmlinuz-${KERNEL_UTS}_bak" || true
+	fi
+
+	if [ -f "${location}/vmlinuz-${KERNEL_UTS}" ] ; then
+		sudo mv "${location}/vmlinuz-${KERNEL_UTS}" "${location}/vmlinuz-${KERNEL_UTS}_bak"
+	fi
+
+	sudo cp -v "${DIR}/deploy/${KERNEL_UTS}.zImage" "${location}/vmlinuz-${KERNEL_UTS}"
+
+	if [ -f "${location}/initrd.img-${KERNEL_UTS}" ] ; then
+		sudo rm -rf "${location}/initrd.img-${KERNEL_UTS}" || true
+	fi
+
+	if [ -f "${DIR}/deploy/${KERNEL_UTS}-dtbs.tar.gz" ] ; then
+		if [ -d "${location}/dtbs/${KERNEL_UTS}_bak/" ] ; then
+			sudo rm -rf "${location}/dtbs/${KERNEL_UTS}_bak/" || true
+		fi
+
+		if [ -d "${location}/dtbs/${KERNEL_UTS}/" ] ; then
+			sudo mv "${location}/dtbs/${KERNEL_UTS}/" "${location}/dtbs/${KERNEL_UTS}_bak/" || true
+		fi
+
+		sudo mkdir -p "${location}/dtbs/${KERNEL_UTS}/"
+
+		echo "Installing ${KERNEL_UTS}-dtbs.tar.gz to ${partition}"
+		sudo tar xf "${DIR}/deploy/${KERNEL_UTS}-dtbs.tar.gz" -C "${location}/dtbs/${KERNEL_UTS}/"
+		sync
+	fi
+
+	unset older_kernel
+	older_kernel=$(grep uname_r "${location}/uEnv.txt" | grep -v '#' | awk -F"=" '{print $2}' || true)
+
+	if [ ! "x${older_kernel}" = "x" ] ; then
+		if [ ! "x${older_kernel}" = "x${KERNEL_UTS}" ] ; then
+			sudo sed -i -e 's:uname_r='${older_kernel}':uname_r='${KERNEL_UTS}':g' "${location}/uEnv.txt"
+		fi
+		echo "info: /boot/uEnv.txt: `grep uname_r ${location}/uEnv.txt`"
 	fi
 }
 
 mmc_write_boot () {
+	if [ ! -f "${location}/zImage" ] ; then
+		echo "Error: no current ${location}/zImage, this might not boot..."
+	fi
+
 	echo "Installing ${KERNEL_UTS} to ${partition}"
-
-	if [ -f "${location}/SOC.sh" ] ; then
-		. "${location}/SOC.sh"
-		ZRELADDR=${load_addr}
-	fi
-
-	if [ -f "${location}/uImage_bak" ] ; then
-		sudo rm -f "${location}/uImage_bak" || true
-	fi
-
-	if [ -f "${location}/uImage" ] ; then
-		sudo mv "${location}/uImage" "${location}/uImage_bak"
-	fi
-
-	if [ "${ZRELADDR}" ] ; then
-		sudo mkimage -A arm -O linux -T kernel -C none -a ${ZRELADDR} -e ${ZRELADDR} -n ${KERNEL_UTS} -d "${DIR}/deploy/${KERNEL_UTS}.zImage" "${location}/uImage"
-	fi
 
 	if [ -f "${location}/zImage_bak" ] ; then
 		sudo rm -f "${location}/zImage_bak" || true
@@ -116,14 +124,19 @@ mmc_write_boot () {
 }
 
 mmc_partition_discover () {
-	if [ -f "${DIR}/deploy/disk/uEnv.txt" ] || [ -f "${DIR}/deploy/disk/BOOT.BIN" ] ; then
+	if [ -f "${DIR}/deploy/disk/uEnv.txt" ] ; then
 		location="${DIR}/deploy/disk"
 		mmc_write_boot
 	fi
 
 	if [ -f "${DIR}/deploy/disk/boot/uEnv.txt" ] ; then
 		location="${DIR}/deploy/disk/boot"
-		mmc_write_boot
+		test_uname=$(grep uname_r "${DIR}/deploy/disk/boot/uEnv.txt" | awk -F"=" '{print $2}' || true)
+		if [ ! "x${test_uname}" = "x" ] ; then
+			mmc_write_boot_uname
+		else
+			mmc_write_boot
+		fi
 	fi
 
 	if [ -f "${DIR}/deploy/disk/etc/fstab" ] ; then
@@ -197,23 +210,22 @@ unmount_partitions () {
 	mmc_detect_n_mount
 }
 
+list_mmc () {
+	echo "fdisk -l:"
+	LC_ALL=C sudo fdisk -l 2>/dev/null | grep "Disk /dev/" --color=never
+	echo ""
+	echo "lsblk:"
+	lsblk | grep -v sr0
+	echo "-----------------------------"
+}
+
 check_mmc () {
 	FDISK=$(LC_ALL=C sudo fdisk -l 2>/dev/null | grep "Disk ${MMC}" | awk '{print $2}')
 
 	if [ "x${FDISK}" = "x${MMC}:" ] ; then
 		echo ""
 		echo "I see..."
-		echo "fdisk -l:"
-		LC_ALL=C sudo fdisk -l 2>/dev/null | grep "Disk /dev/" --color=never
-		echo ""
-		if which lsblk > /dev/null ; then
-			echo "lsblk:"
-			lsblk | grep -v sr0
-		else
-			echo "mount:"
-			mount | grep -v none | grep "/dev/" --color=never
-		fi
-		echo ""
+		list_mmc
 		echo -n "Are you 100% sure, on selecting [${MMC}] (y/n)? "
 		read response
 		if [ "x${response}" = "xy" ] ; then
@@ -224,11 +236,7 @@ check_mmc () {
 		echo ""
 		echo "Are you sure? I Don't see [${MMC}], here is what I do see..."
 		echo ""
-		echo "fdisk -l:"
-		LC_ALL=C sudo fdisk -l 2>/dev/null | grep "Disk /dev/" --color=never
-		echo ""
-		echo "mount:"
-		mount | grep -v none | grep "/dev/" --color=never
+		list_mmc
 		echo "Please update MMC variable in system.sh"
 	fi
 }
@@ -239,17 +247,16 @@ if [ -f "${DIR}/system.sh" ] ; then
 	if [ -f "${DIR}/KERNEL/arch/arm/boot/zImage" ] ; then
 		KERNEL_UTS=$(cat "${DIR}/KERNEL/include/generated/utsrelease.h" | awk '{print $3}' | sed 's/\"//g' )
 		if [ "x${MMC}" = "x" ] ; then
+			echo "-----------------------------"
+			echo "lsblk:"
+			lsblk | grep -v sr0
+			echo "-----------------------------"
 			echo "ERROR: MMC is not defined in system.sh"
-			if which lsblk > /dev/null ; then
-				echo "-----------------------------"
-				echo "lsblk:"
-				lsblk | grep -v sr0
-				echo "-----------------------------"
-			fi
 		else
 			unset PARTITION_PREFIX
 			echo ${MMC} | grep mmcblk >/dev/null && PARTITION_PREFIX="p"
 			check_mmc
+			sync
 		fi
 	else
 		echo "ERROR: arch/arm/boot/zImage not found, Please run build_kernel.sh before running this script..."
